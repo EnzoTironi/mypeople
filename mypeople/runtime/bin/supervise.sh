@@ -81,6 +81,9 @@ while true; do
   ensure "ttyd -W -a -p $TTYD_PORT"        "exec ttyd -W -a -p $TTYD_PORT $TTYD_CLIENT_OPTS '$BIN/ttyd-attach.sh'"
   ensure "ttyd -a -p $TTYD_RO_PORT"        "exec ttyd -a -p $TTYD_RO_PORT $TTYD_CLIENT_OPTS '$BIN/ttyd-attach.sh'"
   ensure "$BIN/boss-supervisor.sh"         "exec bash '$BIN/boss-supervisor.sh'"
+  # Chat plugins: off until queue.env turns them on (see each script's header).
+  [ -n "${PLOW_CHAT:-}" ] && ensure "$ID/plugins/plow-chat/plow-chat.py" "exec python3 '$ID/plugins/plow-chat/plow-chat.py' serve"
+  [ -n "${DISCORD_BOT_TOKEN:-}" ] && ensure "$ID/plugins/discord/discord-chat.py" "exec python3 '$ID/plugins/discord/discord-chat.py' serve"
   recycle_leaked_ttyd "ttyd -W -a -p $TTYD_PORT"
   recycle_leaked_ttyd "ttyd -a -p $TTYD_RO_PORT"
   sleep 10

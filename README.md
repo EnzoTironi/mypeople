@@ -125,3 +125,26 @@ mypeople up --client
 
 For cross-host terminal links, set `TTYD_PUBLIC_URL` to a browser-reachable URL for that worker,
 such as `http://worker.lan:7681`. A same-host board derives the terminal host from the browser origin.
+
+## Chat with your Boss
+
+Two optional plugins. Add their lines to `~/.config/mypeople/queue.env`, then `mypeople down && mypeople up`.
+
+**Plow messages** (text the Boss over iMessage/SMS):
+
+```bash
+export PLOW_CHAT=1
+```
+
+The first time it starts, run `python3 "$INSTALL_DIR/plugins/plow-chat/plow-chat.py" status` and text the
+`Plow Activate: …` line it prints to the number it prints. After that, texts reach the Boss and it replies
+in the same thread, including group threads you add the number to.
+
+**Discord** (people in your server chat with the Boss):
+
+```bash
+export DISCORD_BOT_TOKEN="…"            # bot in your server, Message Content intent on
+export DISCORD_CHANNEL_IDS="1234,5678"  # channels it listens and answers in
+```
+
+Discord messages reach the Boss marked as the public, not you, so it talks with them but does not act on their orders.
