@@ -1,7 +1,7 @@
-"""The Instagram comment receiver: only signed pushes count, each comment is delivered once, our
-own comments never, and a comment survives the fleet being unreachable.
+"""The Instagram comments plugin: only signed pushes count, each comment is delivered once, our
+own comments never, and a comment survives its agent not being up yet.
 
-Instagram, the queue and the clock are stubbed, so nothing leaves the box.
+Instagram, docker and the clock are stubbed, so nothing leaves the box.
 """
 import hashlib
 import hmac
@@ -72,11 +72,19 @@ class InstagramCommentsTests(unittest.TestCase):
                 with self.assertRaises(StopIteration):
                     self.m.forward_loop()
             self.assertEqual(["c1"], [c["id"] for c in self.m.spool_pending()])
-            with mock.patch.object(self.m, "deliver", side_effect=lambda a, t: calls.append((a, t)) or True):
+            with mock.patch.object(self.m, "deliver", side_effect=lambda t: calls.append(t) or True):
                 with self.assertRaises(StopIteration):
                     self.m.forward_loop()
         self.assertEqual([], self.m.spool_pending())
-        self.assertEqual([("node/main:Boss", "[IG REPLY] comment_id=c1 user=fan permalink=media:m1: hi")], calls)
+        self.assertEqual(["[IG REPLY] comment_id=c1 user=fan permalink=media:m1: hi"], calls)
+
+    def test_a_cold_agent_gets_nothing_typed_into_it(self):
+        # The session is still starting: the comment must stay spooled, not vanish into a pane
+        # that is not taking input yet.
+        with mock.patch.object(self.m, "ensure_agent", return_value=False), \
+             mock.patch.object(self.m, "docker") as docker:
+            self.assertFalse(self.m.deliver("[IG REPLY] comment_id=c1 user=fan permalink=x: hi"))
+        docker.assert_not_called()
 
 
 if __name__ == "__main__":

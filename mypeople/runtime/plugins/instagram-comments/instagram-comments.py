@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""Instagram comment receiver: Meta pushes each new comment here, and it reaches the agent that answers.
+"""Instagram comments plugin: Meta pushes each new comment here, straight into the tab of the agent
+this plugin owns, and that agent answers it.
 
 Push, not polling. The Facebook app's `instagram` webhook (field `comments`) POSTs every new
-comment on the account's posts to this server. Each one is checked against the app secret,
-written to a spool on disk, and forwarded through the fleet queue -- the same path a cross-host
-`mp send` takes -- in the shape the reply-to-ig skill reads:
+comment on the account's posts to this server. Each one is checked against the app secret and
+written to a spool on disk.
+
+Plugin on means its agent is up, the way the Boss is always up: one persistent Claude session
+with its own role (agent/CLAUDE.md, the persona, the reply-to-ig skill) in a container of its own,
+because it answers public comments on its own and anyone commenting can try to steer it. Before
+every delivery the plugin makes sure that container runs and the session is ready, then pastes
 
     [IG REPLY] comment_id=<ID> user=<username> permalink=<POST URL>: <text>
 
-Run it on a host that does not sleep. When the fleet is unreachable (its Mac asleep) comments
-stay in the spool and are retried until they land, so nothing is dropped. It never posts to
-Instagram; answering is the receiving agent's job.
+into its tab. Never through the Boss. A comment that arrives while the agent is still starting
+stays in the spool and is retried, so a cold start drops nothing.
 
 Config (env, or the file MYPEOPLE_CONFIG_PATH names, default ~/.config/mypeople/queue.env):
 
@@ -19,18 +23,22 @@ Config (env, or the file MYPEOPLE_CONFIG_PATH names, default ~/.config/mypeople/
     INSTAGRAM_VERIFY_TOKEN=...        # answers Meta's subscribe handshake
     INSTAGRAM_TOKEN=...               # read-only use: looks up a post's permalink
     INSTAGRAM_USER_ID=1784...         # the account; its own comments are never forwarded
-    INSTAGRAM_COMMENTS_AGENT=host/main:Boss   # optional: default is this host's Boss
     INSTAGRAM_WEBHOOK_PORT=8796       # local port; expose it with `tailscale funnel`
-    QUEUE_URL / QUEUE_SECRET          # the fleet queue to deliver through
+    INSTAGRAM_AGENT_PERSONA=path      # who the agent talks like; kept out of the repo
+    INSTAGRAM_AGENT_NAME=ig-agent     # optional: container name
+    CLAUDE_CREDENTIALS=path           # optional: default ~/.claude/.credentials.json
 
-    instagram-comments.py serve    receive + forward forever (what supervise.sh / systemd runs)
-    instagram-comments.py status   pending spool and where comments go
+    instagram-comments.py serve    receive + deliver forever (what supervise.sh / systemd runs)
+    instagram-comments.py status   pending spool and whether the agent is up
 """
 import hashlib
 import hmac
 import json
 import os
+import shutil
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -47,6 +55,9 @@ SEEN = STATE_DIR / "seen.json"
 GRAPH = "https://graph.facebook.com/v21.0/"
 RETRY_SECS = 30   # only while something is undelivered; an empty spool waits for the next push
 SNIPPET = 400
+AGENT_DIR = Path(__file__).resolve().parent / "agent"
+IMAGE = "mypeople-instagram-agent"
+READY_MARK = "bypass permissions on"   # Claude's footer once the session takes input
 LOCK = threading.Lock()
 WAKE = threading.Event()
 
@@ -168,37 +179,73 @@ def permalink(media_id, cache={}):
     return cache.get(media_id, "")
 
 
-def target():
-    return cfg("INSTAGRAM_COMMENTS_AGENT") or "%s/main:Boss" % cfg(
-        "HOST_ID", os.uname().nodename.split(".")[0])
+def agent_name():
+    return cfg("INSTAGRAM_AGENT_NAME", "ig-agent")
 
 
-def deliver(agent, text):
-    """Cross-host `mp send`: submit a send task to the fleet queue and wait for its result."""
-    base, hdr = cfg("QUEUE_URL", "http://127.0.0.1:9900"), {"X-Queue-Secret": cfg("QUEUE_SECRET")}
-    tid = http_json("POST", base + "/task/submit",
-                    {"type": "send", "target_agent": agent, "payload": {"message": text}}, hdr)["task_id"]
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        st = http_json("GET", base + "/task/" + tid, None, hdr)
-        if st.get("ok") is not None:
-            return bool(st["ok"])
-        time.sleep(0.5)
-    return False
+def docker(*args, stdin=None, check=True):
+    r = subprocess.run(["docker", *args], input=stdin, capture_output=True, text=True, timeout=600)
+    if check and r.returncode != 0:
+        raise RuntimeError("docker %s: %s" % (args[0], (r.stderr or r.stdout).strip()[:200]))
+    return r.stdout.strip()
+
+
+def create_agent(name):
+    """Build the image and create the container with its token, persona and Claude login."""
+    with tempfile.TemporaryDirectory() as ctx:
+        shutil.copytree(AGENT_DIR, ctx, dirs_exist_ok=True)
+        shutil.copy(cfg("INSTAGRAM_AGENT_PERSONA"), Path(ctx) / "persona.md")
+        docker("build", "-q", "-t", IMAGE, ctx)
+    docker("create", "--name", name, "--restart", "unless-stopped",
+           "-e", "META_ACCESS_TOKEN=" + cfg("INSTAGRAM_TOKEN"), IMAGE)
+    # Only the Claude login goes in, not the other OAuth grants the host file carries.
+    creds = json.loads(Path(cfg("CLAUDE_CREDENTIALS") or Path.home() / ".claude/.credentials.json").read_text())
+    with tempfile.NamedTemporaryFile("w", suffix=".json") as f:
+        json.dump({"claudeAiOauth": creds["claudeAiOauth"]}, f)
+        f.flush()
+        os.chmod(f.name, 0o600)
+        docker("cp", f.name, name + ":/home/node/.claude/.credentials.json")
+
+
+def ensure_agent():
+    """Plugin on means its agent is up: start (or first create) the container. True once the
+    Claude session in it takes input."""
+    name = agent_name()
+    state = docker("inspect", "-f", "{{.State.Running}}", name, check=False)
+    if state not in ("true", "false"):
+        log("creating agent container %s" % name)
+        create_agent(name)
+        state = "false"
+    if state == "false":
+        docker("start", name)
+    pane = docker("exec", name, "tmux", "capture-pane", "-p", "-t", "ig:agent", check=False)
+    return READY_MARK in pane
+
+
+def deliver(text):
+    """Paste one line into the agent's tab and submit it, as `mp send` does for a local pane."""
+    if not ensure_agent():
+        return False
+    name = agent_name()
+    docker("exec", "-i", name, "tmux", "load-buffer", "-b", "ig", "-", stdin=text)
+    docker("exec", name, "tmux", "paste-buffer", "-d", "-b", "ig", "-t", "ig:agent")
+    time.sleep(0.5)   # let the paste land before Enter, or Claude takes it as a newline
+    docker("exec", name, "tmux", "send-keys", "-t", "ig:agent", "Enter")
+    return True
 
 
 def forward_loop():
-    agent = target()
+    agent = agent_name()
     while True:
         pending = spool_pending()
         done = set()
         for c in pending:
             try:
-                if deliver(agent, format_comment(c, permalink(c["media"]))):
+                if deliver(format_comment(c, permalink(c["media"]))):
                     done.add(c["id"])
                 else:
                     break
-            except Exception as e:   # fleet asleep or unreachable: keep it spooled, retry later
+            except Exception as e:   # agent not up yet: keep it spooled, retry later
                 log("delivery to %s waiting: %s" % (agent, str(e)[:120]))
                 break
         if done:
@@ -250,17 +297,22 @@ class Hook(BaseHTTPRequestHandler):
 
 def main(argv):
     cmd = argv[1] if len(argv) > 1 else "serve"
-    missing = [k for k in ("INSTAGRAM_APP_SECRET", "INSTAGRAM_VERIFY_TOKEN", "INSTAGRAM_USER_ID") if not cfg(k)]
+    missing = [k for k in ("INSTAGRAM_APP_SECRET", "INSTAGRAM_VERIFY_TOKEN", "INSTAGRAM_USER_ID",
+                           "INSTAGRAM_TOKEN", "INSTAGRAM_AGENT_PERSONA") if not cfg(k)]
     if missing:
         log("missing config: " + ", ".join(missing))
         return 2
     if cmd == "status":
-        print("%d comment(s) waiting in %s; they go to %s via %s"
-              % (len(spool_pending()), SPOOL, target(), cfg("QUEUE_URL", "http://127.0.0.1:9900")))
+        print("%d comment(s) waiting in %s; agent %s ready: %s"
+              % (len(spool_pending()), SPOOL, agent_name(), ensure_agent()))
         return 0
     port = int(cfg("INSTAGRAM_WEBHOOK_PORT", "8796"))
+    try:
+        ensure_agent()   # plugin on means its agent is up, before the first comment arrives
+    except Exception as e:
+        log("agent not up yet: %s" % e)
     threading.Thread(target=forward_loop, daemon=True).start()
-    log("listening on 127.0.0.1:%d, delivering to %s" % (port, target()))
+    log("listening on 127.0.0.1:%d, delivering to agent %s" % (port, agent_name()))
     ThreadingHTTPServer(("127.0.0.1", port), Hook).serve_forever()
 
 
