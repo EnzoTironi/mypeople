@@ -1,49 +1,54 @@
 #!/usr/bin/env python3
-"""Instagram comment watcher: new comments on the account's posts reach the agent that answers them.
+"""Instagram comment receiver: Meta pushes each new comment here, and it reaches the agent that answers.
 
-Every poll this reads the comments (and thread replies) on the account's most recent posts through
-the Instagram Graph API and delivers each NEW one with `mp send`, in the shape the reply-to-ig
-skill expects:
+Push, not polling. The Facebook app's `instagram` webhook (field `comments`) POSTs every new
+comment on the account's posts to this server. Each one is checked against the app secret,
+written to a spool on disk, and forwarded through the fleet queue -- the same path a cross-host
+`mp send` takes -- in the shape the reply-to-ig skill reads:
 
     [IG REPLY] comment_id=<ID> user=<username> permalink=<POST URL>: <text>
 
-It only reads. Answering is the receiving agent's job (reply-to-ig), so nothing public happens
-unless that agent decides to reply.
+Run it on a host that does not sleep. When the fleet is unreachable (its Mac asleep) comments
+stay in the spool and are retried until they land, so nothing is dropped. It never posts to
+Instagram; answering is the receiving agent's job.
 
-Turn it on in ~/.config/mypeople/queue.env, then restart the daemons:
+Config (env, or the file MYPEOPLE_CONFIG_PATH names, default ~/.config/mypeople/queue.env):
 
-    export INSTAGRAM_COMMENTS=1
-    export INSTAGRAM_TOKEN="..."                # token with instagram_basic + instagram_manage_comments
-    export INSTAGRAM_USER_ID="1784..."          # the Instagram business account id
-    export INSTAGRAM_COMMENTS_AGENT="host/main:ig"  # optional: default is the Boss
-    export INSTAGRAM_COMMENTS_MEDIA=10          # optional: how many recent posts to watch
-    export INSTAGRAM_COMMENTS_INTERVAL=60       # optional: seconds between polls
+    INSTAGRAM_COMMENTS=1
+    INSTAGRAM_APP_SECRET=...          # verifies Meta's X-Hub-Signature-256
+    INSTAGRAM_VERIFY_TOKEN=...        # answers Meta's subscribe handshake
+    INSTAGRAM_TOKEN=...               # read-only use: looks up a post's permalink
+    INSTAGRAM_USER_ID=1784...         # the account; its own comments are never forwarded
+    INSTAGRAM_COMMENTS_AGENT=host/main:Boss   # optional: default is this host's Boss
+    INSTAGRAM_WEBHOOK_PORT=8796       # local port; expose it with `tailscale funnel`
+    QUEUE_URL / QUEUE_SECRET          # the fleet queue to deliver through
 
-The first time a post is seen its existing comments are recorded without being sent, so turning
-this on never replays a post's history at anyone. The account's own comments are never delivered.
-
-    instagram-comments.py serve    poll forever (what supervise.sh runs)
-    instagram-comments.py once     one poll, then exit
-    instagram-comments.py status   account, watched posts, and where comments go
+    instagram-comments.py serve    receive + forward forever (what supervise.sh / systemd runs)
+    instagram-comments.py status   pending spool and where comments go
 """
+import hashlib
+import hmac
 import json
 import os
-import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 INSTALL = Path(os.environ.get("INSTALL_DIR") or os.environ.get("MYPEOPLE_HOME")
                or Path.home() / ".local/share/mypeople")
-STATE = Path(os.environ.get("INSTAGRAM_COMMENTS_STATE_DIR")
-             or INSTALL / "state" / "instagram-comments") / "state.json"
-MP_BIN = os.environ.get("MP_BIN") or str(INSTALL / "bin" / "mp")
+STATE_DIR = Path(os.environ.get("INSTAGRAM_COMMENTS_STATE_DIR") or INSTALL / "state" / "instagram-comments")
+SPOOL = STATE_DIR / "spool.jsonl"
+SEEN = STATE_DIR / "seen.json"
 GRAPH = "https://graph.facebook.com/v21.0/"
-MAX_PAGES = 10   # per post per poll; a post drawing >500 comments between polls loses the rest
+RETRY_SECS = 30   # only while something is undelivered; an empty spool waits for the next push
 SNIPPET = 400
+LOCK = threading.Lock()
+WAKE = threading.Event()
 
 
 def log(msg):
@@ -51,7 +56,7 @@ def log(msg):
 
 
 def cfg(key, default=""):
-    """Env first, then queue.env -- the same precedence as the rest of the runtime."""
+    """Env first, then the config file -- the same precedence as the rest of the runtime."""
     if os.environ.get(key):
         return os.environ[key]
     path = os.environ.get("MYPEOPLE_CONFIG_PATH") or str(Path.home() / ".config/mypeople/queue.env")
@@ -66,136 +71,192 @@ def cfg(key, default=""):
     return default
 
 
-# ---------------------------------------------------------------- Instagram
-def graph(path_or_url, **params):
-    token = cfg("INSTAGRAM_TOKEN")
-    if path_or_url.startswith("https://"):
-        url = path_or_url   # a paging "next" link already carries the token
-    else:
-        url = GRAPH + path_or_url + "?" + urllib.parse.urlencode(dict(params, access_token=token))
-    try:
-        with urllib.request.urlopen(url, timeout=60) as r:
-            return json.load(r)
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", "replace")[:300]
-        # Meta echoes the request back in some errors; the token must never reach a log.
-        raise RuntimeError("graph %s: HTTP %d %s" % (path_or_url.split("?")[0][:60], e.code,
-                                                     body.replace(token, "<token>") if token else body))
+# ---------------------------------------------------------------- what Meta sends
+def signature_ok(body, header):
+    secret = cfg("INSTAGRAM_APP_SECRET").encode()
+    want = "sha256=" + hmac.new(secret, body, hashlib.sha256).hexdigest()
+    return bool(secret) and hmac.compare_digest(want, header or "")
 
 
-def own_username():
-    return graph(cfg("INSTAGRAM_USER_ID"), fields="username").get("username", "")
-
-
-def recent_media():
-    n = int(cfg("INSTAGRAM_COMMENTS_MEDIA", "10"))
-    data = graph(cfg("INSTAGRAM_USER_ID") + "/media", fields="id,permalink", limit=n)
-    return [(m["id"], m.get("permalink", "")) for m in data.get("data", [])[:n]]
-
-
-def media_comments(media_id):
-    """Every comment on a post, thread replies included, as flat dicts."""
-    out, page = [], graph(media_id + "/comments", limit=50,
-                          fields="id,text,username,timestamp,replies{id,text,username,timestamp}")
-    for _ in range(MAX_PAGES):
-        for c in page.get("data", []):
-            out.append(c)
-            out.extend((c.get("replies") or {}).get("data", []))
-        nxt = (page.get("paging") or {}).get("next")
-        if not nxt:
-            break
-        page = graph(nxt)
+def comments_in(payload, own_id):
+    """The new comments in one webhook body, minus the account's own."""
+    out = []
+    if payload.get("object") != "instagram":
+        return out
+    for entry in payload.get("entry") or []:
+        for ch in entry.get("changes") or []:
+            v = ch.get("value") or {}
+            if ch.get("field") != "comments" or not v.get("id"):
+                continue
+            who = v.get("from") or {}
+            if own_id and str(who.get("id")) == str(own_id):
+                continue
+            out.append({"id": str(v["id"]), "text": v.get("text") or "", "user": who.get("username") or "?",
+                        "media": str((v.get("media") or {}).get("id") or "")})
     return out
 
 
-# ---------------------------------------------------------------- what is new
-def fresh_comments(media_id, comments, state, me):
-    """New comments on this post, recording everything as seen. A post's first sighting is silent."""
-    seen = set(state.setdefault("seen", []))
-    known = set(state.setdefault("media", []))
-    new = [c for c in comments if c["id"] not in seen]
-    state["seen"] = sorted(seen | {c["id"] for c in comments})
-    if media_id not in known:
-        state["media"] = sorted(known | {media_id})
-        return []
-    return [c for c in new if (c.get("username") or "").lower() != me.lower()]
-
-
 def format_comment(c, permalink):
-    text = " ".join((c.get("text") or "").split())
+    text = " ".join(c["text"].split())
     if len(text) > SNIPPET:
         text = text[:SNIPPET - 1] + "…"
     return "[IG REPLY] comment_id=%s user=%s permalink=%s: %s" % (
-        c["id"], c.get("username") or "?", permalink, text or "(no text)")
+        c["id"], c["user"], permalink or "media:" + c["media"], text or "(no text)")
 
 
-# ---------------------------------------------------------------- the fleet
+# ---------------------------------------------------------------- spool
+def read_json(path, default):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return default
+
+
+def spool_add(comments):
+    """Append comments not seen before. Meta retries a delivery it thinks failed; a comment is
+    spooled once."""
+    with LOCK:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        seen = set(read_json(SEEN, []))
+        fresh = [c for c in comments if c["id"] not in seen]
+        if fresh:
+            with open(SPOOL, "a") as f:
+                for c in fresh:
+                    f.write(json.dumps(c) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            tmp = SEEN.with_suffix(".tmp")
+            # ponytail: seen ids grow forever (~25 bytes each); trim to the last N if it ever matters
+            tmp.write_text(json.dumps(sorted(seen | {c["id"] for c in fresh})))
+            tmp.replace(SEEN)
+    return fresh
+
+
+def spool_pending():
+    with LOCK:
+        try:
+            return [json.loads(l) for l in SPOOL.read_text().splitlines() if l.strip()]
+        except OSError:
+            return []
+
+
+def spool_drop(ids):
+    with LOCK:
+        keep = [l for l in (SPOOL.read_text().splitlines() if SPOOL.exists() else [])
+                if l.strip() and json.loads(l)["id"] not in ids]
+        tmp = SPOOL.with_suffix(".tmp")
+        tmp.write_text("".join(l + "\n" for l in keep))
+        tmp.replace(SPOOL)
+
+
+# ---------------------------------------------------------------- delivery
+def http_json(method, url, body=None, headers=None, timeout=10):
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, method=method,
+                                 headers=dict({"Content-Type": "application/json"}, **(headers or {})))
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+
+
+def permalink(media_id, cache={}):
+    if media_id and media_id not in cache:
+        try:
+            q = urllib.parse.urlencode({"fields": "permalink", "access_token": cfg("INSTAGRAM_TOKEN")})
+            cache[media_id] = http_json("GET", GRAPH + media_id + "?" + q).get("permalink", "")
+        except Exception:
+            return ""   # not cached: the next comment on this post tries again
+    return cache.get(media_id, "")
+
+
 def target():
     return cfg("INSTAGRAM_COMMENTS_AGENT") or "%s/main:Boss" % cfg(
         "HOST_ID", os.uname().nodename.split(".")[0])
 
 
 def deliver(agent, text):
-    r = subprocess.run([sys.executable, MP_BIN, "send", agent, text], capture_output=True, text=True,
-                       timeout=60)
-    return r.returncode == 0
+    """Cross-host `mp send`: submit a send task to the fleet queue and wait for its result."""
+    base, hdr = cfg("QUEUE_URL", "http://127.0.0.1:9900"), {"X-Queue-Secret": cfg("QUEUE_SECRET")}
+    tid = http_json("POST", base + "/task/submit",
+                    {"type": "send", "target_agent": agent, "payload": {"message": text}}, hdr)["task_id"]
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        st = http_json("GET", base + "/task/" + tid, None, hdr)
+        if st.get("ok") is not None:
+            return bool(st["ok"])
+        time.sleep(0.5)
+    return False
 
 
-# ---------------------------------------------------------------- loop
-def load_state():
-    try:
-        return json.loads(STATE.read_text())
-    except (OSError, ValueError):
-        return {}
-
-
-def save_state(state):
-    STATE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = STATE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=1, sort_keys=True))
-    tmp.replace(STATE)
-
-
-def poll(state, me):
-    outbox = []
-    for media_id, permalink in recent_media():
-        for c in fresh_comments(media_id, media_comments(media_id), state, me):
-            outbox.append(format_comment(c, permalink))
-    # Seen-state is saved before sending: a crash mid-send drops a delivery rather than
-    # re-sending comments the agent may already have answered in public.
-    save_state(state)
+def forward_loop():
     agent = target()
-    for text in outbox:
-        if not deliver(agent, text):
-            log("mp send to %s failed: %s" % (agent, text[:120]))
-    if outbox:
-        log("delivered %d new comment(s) to %s" % (len(outbox), agent))
+    while True:
+        pending = spool_pending()
+        done = set()
+        for c in pending:
+            try:
+                if deliver(agent, format_comment(c, permalink(c["media"]))):
+                    done.add(c["id"])
+                else:
+                    break
+            except Exception as e:   # fleet asleep or unreachable: keep it spooled, retry later
+                log("delivery to %s waiting: %s" % (agent, str(e)[:120]))
+                break
+        if done:
+            spool_drop(done)
+            log("delivered %d comment(s) to %s" % (len(done), agent))
+        WAKE.wait(RETRY_SECS if len(pending) > len(done) else None)
+        WAKE.clear()
+
+
+# ---------------------------------------------------------------- HTTP
+class Hook(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def reply(self, code, body=b""):
+        self.send_response(code)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        ok = (q.get("hub.mode") == ["subscribe"] and cfg("INSTAGRAM_VERIFY_TOKEN")
+              and hmac.compare_digest(q.get("hub.verify_token", [""])[0], cfg("INSTAGRAM_VERIFY_TOKEN")))
+        self.reply(200, q["hub.challenge"][0].encode()) if ok and q.get("hub.challenge") else self.reply(403)
+
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        if n > 1_000_000:
+            return self.reply(413)
+        body = self.rfile.read(n)
+        if not signature_ok(body, self.headers.get("X-Hub-Signature-256")):
+            log("rejected a POST with a bad signature")
+            return self.reply(403)
+        try:
+            fresh = spool_add(comments_in(json.loads(body), cfg("INSTAGRAM_USER_ID")))
+        except ValueError:
+            return self.reply(400)
+        if fresh:
+            WAKE.set()
+        self.reply(200, b"ok")
 
 
 def main(argv):
     cmd = argv[1] if len(argv) > 1 else "serve"
-    if not (cfg("INSTAGRAM_TOKEN") and cfg("INSTAGRAM_USER_ID")):
-        log("INSTAGRAM_TOKEN and INSTAGRAM_USER_ID must be set in queue.env")
+    missing = [k for k in ("INSTAGRAM_APP_SECRET", "INSTAGRAM_VERIFY_TOKEN", "INSTAGRAM_USER_ID") if not cfg(k)]
+    if missing:
+        log("missing config: " + ", ".join(missing))
         return 2
-    me = own_username()
     if cmd == "status":
-        media = recent_media()
-        print("@%s: watching %d recent post(s), new comments go to %s" % (me, len(media), target()))
-        for _, permalink in media:
-            print("  " + permalink)
+        print("%d comment(s) waiting in %s; they go to %s via %s"
+              % (len(spool_pending()), SPOOL, target(), cfg("QUEUE_URL", "http://127.0.0.1:9900")))
         return 0
-    state = load_state()
-    if cmd == "once":
-        poll(state, me)
-        return 0
-    interval = int(cfg("INSTAGRAM_COMMENTS_INTERVAL", "60"))
-    log("watching @%s every %ds" % (me, interval))
-    while True:
-        try:
-            poll(state, me)
-        except Exception as e:  # a Graph API hiccup must not kill the watcher
-            log("poll failed: %s" % e)
-        time.sleep(interval)
+    port = int(cfg("INSTAGRAM_WEBHOOK_PORT", "8796"))
+    threading.Thread(target=forward_loop, daemon=True).start()
+    log("listening on 127.0.0.1:%d, delivering to %s" % (port, target()))
+    ThreadingHTTPServer(("127.0.0.1", port), Hook).serve_forever()
 
 
 if __name__ == "__main__":
