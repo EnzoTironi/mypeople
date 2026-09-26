@@ -83,6 +83,8 @@ while true; do
   ensure "$BIN/boss-supervisor.sh"         "exec bash '$BIN/boss-supervisor.sh'"
   # GitHub PR watcher: off until queue.env sets GITHUB_PRS (see the plugin's header).
   [ -n "${GITHUB_PRS:-}" ] && ensure "$ID/plugins/github-prs/github-prs.py" "exec python3 '$ID/plugins/github-prs/github-prs.py' serve"
+  # Instagram comment watcher: off until queue.env sets INSTAGRAM_COMMENTS (see the plugin's header).
+  [ -n "${INSTAGRAM_COMMENTS:-}" ] && ensure "$ID/plugins/instagram-comments/instagram-comments.py" "exec python3 '$ID/plugins/instagram-comments/instagram-comments.py' serve"
   recycle_leaked_ttyd "ttyd -W -a -p $TTYD_PORT"
   recycle_leaked_ttyd "ttyd -a -p $TTYD_RO_PORT"
   sleep 10
