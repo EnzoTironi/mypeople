@@ -235,9 +235,14 @@ class Hook(BaseHTTPRequestHandler):
             log("rejected a POST with a bad signature")
             return self.reply(403)
         try:
-            fresh = spool_add(comments_in(json.loads(body), cfg("INSTAGRAM_USER_ID")))
+            payload = json.loads(body)
+            fresh = spool_add(comments_in(payload, cfg("INSTAGRAM_USER_ID")))
         except ValueError:
             return self.reply(400)
+        # One line per push proves Meta is reaching us, even for events we do not forward.
+        fields = sorted({ch.get("field") or "messaging" for e in payload.get("entry") or []
+                         for ch in (e.get("changes") or e.get("messaging") or [{}])})
+        log("push %s %s: %d new comment(s)" % (payload.get("object"), ",".join(fields), len(fresh)))
         if fresh:
             WAKE.set()
         self.reply(200, b"ok")
