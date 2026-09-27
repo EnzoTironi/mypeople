@@ -7,7 +7,8 @@ comment on the account's posts to this server. Each one is checked against the a
 written to a spool on disk.
 
 Plugin on means its agent is up, the way the Boss is always up: one persistent Claude session
-with its own role (agent/CLAUDE.md, the persona, the reply-to-ig skill) in a container of its own,
+(Grok 4.7 by default) with its own role (agent/CLAUDE.md, the persona, the reply-to-ig skill) in a
+container of its own,
 because it answers public comments on its own and anyone commenting can try to steer it. Before
 every delivery the plugin makes sure that container runs and the session is ready, then pastes
 
@@ -26,7 +27,9 @@ Config (env, or the file MYPEOPLE_CONFIG_PATH names, default ~/.config/mypeople/
     INSTAGRAM_WEBHOOK_PORT=8796       # local port; expose it with `tailscale funnel`
     INSTAGRAM_AGENT_PERSONA=path      # who the agent talks like; kept out of the repo
     INSTAGRAM_AGENT_NAME=ig-agent     # optional: container name
-    CLAUDE_CREDENTIALS=path           # optional: default ~/.claude/.credentials.json
+    INSTAGRAM_AGENT_BACKEND=grok      # optional: grok (default) or claude; the rest of the fleet is unaffected
+    INSTAGRAM_AGENT_MODEL=grok-4.7    # optional: default per backend
+    INSTAGRAM_AGENT_CREDENTIALS=path  # optional: default ~/.grok/auth.json or ~/.claude/.credentials.json
 
     instagram-comments.py serve    receive + deliver forever (what supervise.sh / systemd runs)
     instagram-comments.py status   pending spool and whether the agent is up
@@ -57,7 +60,14 @@ RETRY_SECS = 30   # only while something is undelivered; an empty spool waits fo
 SNIPPET = 400
 AGENT_DIR = Path(__file__).resolve().parent / "agent"
 IMAGE = "mypeople-instagram-agent"
-READY_MARK = "bypass permissions on"   # Claude's footer once the session takes input
+# The agent's CLI: how it starts, which login it needs, and what its tab shows once it takes input.
+BACKENDS = {
+    "grok": {"cmd": "grok --permission-mode bypassPermissions -m {model}", "model": "grok-4.7",
+             "creds": (".grok/auth.json", "/home/node/.grok/auth.json"), "ready": "always-approve"},
+    "claude": {"cmd": "claude --dangerously-skip-permissions --model {model}", "model": "claude-opus-5-5",
+               "creds": (".claude/.credentials.json", "/home/node/.claude/.credentials.json"),
+               "ready": "bypass permissions on"},
+}
 LOCK = threading.Lock()
 WAKE = threading.Event()
 
@@ -190,21 +200,29 @@ def docker(*args, stdin=None, check=True):
     return r.stdout.strip()
 
 
+def backend():
+    b = BACKENDS[cfg("INSTAGRAM_AGENT_BACKEND", "grok")]
+    return dict(b, cmd=b["cmd"].format(model=cfg("INSTAGRAM_AGENT_MODEL") or b["model"]))
+
+
 def create_agent(name):
-    """Build the image and create the container with its token, persona and Claude login."""
+    """Build the image and create the container with its token, persona and the CLI's login."""
+    b = backend()
     with tempfile.TemporaryDirectory() as ctx:
         shutil.copytree(AGENT_DIR, ctx, dirs_exist_ok=True)
         shutil.copy(cfg("INSTAGRAM_AGENT_PERSONA"), Path(ctx) / "persona.md")
         docker("build", "-q", "-t", IMAGE, ctx)
     docker("create", "--name", name, "--restart", "unless-stopped",
-           "-e", "META_ACCESS_TOKEN=" + cfg("INSTAGRAM_TOKEN"), IMAGE)
-    # Only the Claude login goes in, not the other OAuth grants the host file carries.
-    creds = json.loads(Path(cfg("CLAUDE_CREDENTIALS") or Path.home() / ".claude/.credentials.json").read_text())
+           "-e", "META_ACCESS_TOKEN=" + cfg("INSTAGRAM_TOKEN"), "-e", "IG_AGENT_CMD=" + b["cmd"], IMAGE)
+    host_file, box_file = b["creds"]
+    creds = json.loads(Path(cfg("INSTAGRAM_AGENT_CREDENTIALS") or Path.home() / host_file).read_text())
+    if "claudeAiOauth" in creds:   # only the Claude login, not the other OAuth grants that file carries
+        creds = {"claudeAiOauth": creds["claudeAiOauth"]}
     with tempfile.NamedTemporaryFile("w", suffix=".json") as f:
-        json.dump({"claudeAiOauth": creds["claudeAiOauth"]}, f)
+        json.dump(creds, f)
         f.flush()
         os.chmod(f.name, 0o600)
-        docker("cp", f.name, name + ":/home/node/.claude/.credentials.json")
+        docker("cp", f.name, name + ":" + box_file)
 
 
 def ensure_agent():
@@ -219,7 +237,7 @@ def ensure_agent():
     if state == "false":
         docker("start", name)
     pane = docker("exec", name, "tmux", "capture-pane", "-p", "-t", "ig:agent", check=False)
-    return READY_MARK in pane
+    return backend()["ready"] in pane
 
 
 def deliver(text):
@@ -303,8 +321,8 @@ def main(argv):
         log("missing config: " + ", ".join(missing))
         return 2
     if cmd == "status":
-        print("%d comment(s) waiting in %s; agent %s ready: %s"
-              % (len(spool_pending()), SPOOL, agent_name(), ensure_agent()))
+        print("%d comment(s) waiting in %s; agent %s (%s) ready: %s"
+              % (len(spool_pending()), SPOOL, agent_name(), backend()["cmd"], ensure_agent()))
         return 0
     port = int(cfg("INSTAGRAM_WEBHOOK_PORT", "8796"))
     try:

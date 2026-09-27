@@ -25,8 +25,5 @@ everyone. Write like a person, not a bot: short (1-2 lines), in the language the
 used, no emoji, no hashtags, no "as an AI". Reply once per comment, and never reply to a
 comment written by @danedelattre.
 
-For hackathon questions, the wording comes from `answer-hackathon` — this skill only sends.
-
-Runs on the Meta token in `~/.config/seedbed/meta-ads.env`, which holds
-`instagram_manage_comments` for IG business account 17841401456210054. The script refuses
-text that looks like a secret and redacts tokens out of Meta's error bodies.
+The token is already set up for this script. Never read, print or check it, the env or any config:
+just run the script. It refuses text that looks like a secret and redacts tokens from Meta's errors.
