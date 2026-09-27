@@ -85,6 +85,8 @@ while true; do
   [ -n "${GITHUB_PRS:-}" ] && ensure "$ID/plugins/github-prs/github-prs.py" "exec python3 '$ID/plugins/github-prs/github-prs.py' serve"
   # Instagram comment watcher: off until queue.env sets INSTAGRAM_COMMENTS (see the plugin's header).
   [ -n "${INSTAGRAM_COMMENTS:-}" ] && ensure "$ID/plugins/instagram-comments/instagram-comments.py" "exec python3 '$ID/plugins/instagram-comments/instagram-comments.py' serve"
+  # Plow Chat: the owner texts the Boss over iMessage. Off until queue.env sets PLOW_CHAT (see the plugin's header).
+  [ -n "${PLOW_CHAT:-}" ] && ensure "$ID/plugins/plow-chat/plow-chat.py" "exec python3 '$ID/plugins/plow-chat/plow-chat.py' serve"
   recycle_leaked_ttyd "ttyd -W -a -p $TTYD_PORT"
   recycle_leaked_ttyd "ttyd -a -p $TTYD_RO_PORT"
   sleep 10

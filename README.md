@@ -143,3 +143,11 @@ answer (use it after downtime, or when a review lands while the watcher is off),
 days by default — `--days N` changes that, `--days 0` removes the limit; `… catchup-dry` lists them
 without sending. The first time it sees a PR it records the existing comments silently,
 so turning it on never replays old reviews.
+
+## Text your Boss
+
+Add `export PLOW_CHAT=1` to `~/.config/mypeople/queue.env`, then `mypeople down && mypeople up`.
+
+The first time it starts, run `python3 "$INSTALL_DIR/plugins/plow-chat/plow-chat.py" status` and text the
+`Plow Activate: …` line it prints to the number it prints. After that your iMessages reach the Boss and it
+replies in the same thread, including group threads you add the number to.
