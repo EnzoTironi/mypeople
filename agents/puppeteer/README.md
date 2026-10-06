@@ -152,8 +152,9 @@ It never interprets the participant's text as a shell command.
 
 Each source message gets one persistent request ID. Concurrent retries do
 not send twice. The local coding agent receives a callback command that
-stores its answer under that ID. Only that target agent's `AGENT_ID` can
-complete the request, and results can be read through its shared
+stores its answer under that ID. A private key delivered only to that
+session authorizes its reply; only the key's hash is stored in the ledger.
+This also works when Codex filters inherited shell variables. Results can be read through the shared
 conversation. A submission receipt is not a completed answer. Uncertain
 delivery remains uncertain instead of being automatically replayed.
 Requests time out after 15 minutes. The cloud agent waits on the receipt;

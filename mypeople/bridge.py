@@ -3,10 +3,13 @@
 import argparse
 from contextlib import contextmanager
 import datetime
+import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shlex
 import sqlite3
 import subprocess
@@ -96,7 +99,8 @@ class Bridge:
                 connection.execute("""CREATE TABLE IF NOT EXISTS requests (
                     id TEXT PRIMARY KEY, chat TEXT NOT NULL, message TEXT NOT NULL,
                     alias TEXT NOT NULL, target TEXT NOT NULL, status TEXT NOT NULL,
-                    reply TEXT, created REAL NOT NULL, UNIQUE(chat, message))""")
+                    reply TEXT, created REAL NOT NULL, reply_key_hash TEXT NOT NULL,
+                    UNIQUE(chat, message))""")
                 yield connection
         finally:
             connection.close()
@@ -179,17 +183,22 @@ class Bridge:
         if alias not in available:
             raise BridgeError("local_agent_unavailable")
         request_id = uuid.uuid4().hex
+        reply_key = secrets.token_urlsafe(32)
         with self.ledger() as db:
             db.execute("BEGIN IMMEDIATE")
-            db.execute("INSERT OR IGNORE INTO requests VALUES (?,?,?,?,?,?,?,?)",
-                       (request_id, chat, message, alias, target, "dispatching", None, self.clock()))
+            db.execute("INSERT OR IGNORE INTO requests VALUES (?,?,?,?,?,?,?,?,?)",
+                       (request_id, chat, message, alias, target, "dispatching", None, self.clock(),
+                        hashlib.sha256(reply_key.encode()).hexdigest()))
             row = db.execute("SELECT * FROM requests WHERE chat=? AND message=?", (chat, message)).fetchone()
             if row["id"] != request_id:
                 if row["alias"] != alias:
                     raise BridgeError("source_message_already_routed_to_another_agent")
                 return self.receipt(row)
-        callback = shlex.join(["env", "MYPEOPLE_BRIDGE_CONFIG=" + str(self.config_path),
-                              sys.executable, "-m", "mypeople.bridge", "reply", request_id])
+        from mypeople.cli import CONFIG_PATH
+        callback = shlex.join(["env", "MYPEOPLE_CONFIG_PATH=" + CONFIG_PATH,
+                              "MYPEOPLE_BRIDGE_CONFIG=" + str(self.config_path),
+                              sys.executable, "-m", "mypeople.bridge", "reply", request_id,
+                              "--key", reply_key])
         prompt = ("[Puppeteer request " + request_id + "]\n"
                   "The owner shared this agent with Plow conversation " + chat + ".\n"
                   "Answer the following request in your current project and session. "
@@ -197,6 +206,7 @@ class Bridge:
                   "When finished, deliver only your answer to that conversation by running:\n"
                   + callback + " --text 'your answer'\n"
                   "You may instead pipe your answer on stdin to that same command. "
+                  "Keep the reply key private; it authorizes only this request. "
                   "Do not change the request ID or send to other conversations.\n"
                   "--- participant message ---\n" + body + "\n--- end participant message ---")
         environment = {k: v for k, v in os.environ.items() if k not in ("AGENT_ID", "BOSS_ID")}
@@ -224,15 +234,16 @@ class Bridge:
                 row = db.execute("SELECT * FROM requests WHERE id=?", (request_id,)).fetchone()
             return self.receipt(row)
 
-    def reply(self, request_id, text):
+    def reply(self, request_id, text, key):
         identifier(request_id)
         if not text.strip() or len(text) > 32000:
             raise BridgeError("reply_required_max_32000_characters")
         with self.ledger() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM requests WHERE id=?", (request_id,)).fetchone()
-            if not row or os.environ.get("AGENT_ID") != row["target"]:
-                raise BridgeError("reply_must_come_from_target_local_agent")
+            if not row or not isinstance(key, str) or not hmac.compare_digest(
+                    row["reply_key_hash"], hashlib.sha256(key.encode()).hexdigest()):
+                raise BridgeError("invalid_reply_key")
             config = self.authorize(row["chat"])
             if config["agents"].get(row["alias"]) != row["target"]:
                 raise BridgeError("agent_not_shared")
@@ -267,6 +278,7 @@ def main(argv=None, cfg=None):
     result.add_argument("--wait", type=int, choices=range(31), default=0, metavar="0..30")
     reply = commands.add_parser("reply", help="Local agent: complete a request")
     reply.add_argument("request")
+    reply.add_argument("--key", required=True, help="Private per-request key delivered to the target session")
     reply.add_argument("--text", help="Reply text; otherwise read stdin")
     args = parser.parse_args(argv)
     settings = cfg if cfg is not None else cli.load_cfg()
@@ -289,7 +301,7 @@ def main(argv=None, cfg=None):
                 time.sleep(min(1, max(0, deadline - time.monotonic())))
                 value = bridge.result(args.chat, args.request)
         else:
-            value = bridge.reply(args.request, args.text if args.text is not None else sys.stdin.read())
+            value = bridge.reply(args.request, args.text if args.text is not None else sys.stdin.read(), args.key)
         print(json.dumps(value, ensure_ascii=False))
         return 0
     except (BridgeError, OSError, sqlite3.Error) as error:

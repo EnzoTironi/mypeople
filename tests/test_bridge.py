@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import tempfile
 import threading
@@ -72,11 +73,16 @@ class BridgeTest(unittest.TestCase):
     def ask(self):
         return self.bridge.ask("cht_shared", "msg_original", "coder")
 
+    def reply_key(self):
+        command = next(line for line in self.dispatch.call_args.kwargs["input"].splitlines() if line.startswith("env "))
+        args = shlex.split(command)
+        return args[args.index("--key") + 1]
+
     def test_roundtrip_survives_restart_and_replies_only_to_source_chat(self):
         receipt = self.ask()
         self.assertEqual(receipt["status"], "submitted")
         with patch.dict(os.environ, {"AGENT_ID": "sam/main:coder"}):
-            self.bridge.reply(receipt["request"], "The entry point is cli.main.")
+            self.bridge.reply(receipt["request"], "The entry point is cli.main.", self.reply_key())
         restarted = Bridge(self.cfg, self.bridge.config_path)
         self.assertEqual(restarted.result("cht_shared", receipt["request"])["reply"], "The entry point is cli.main.")
         with self.assertRaisesRegex(BridgeError, "chat_not_shared"):
@@ -101,6 +107,10 @@ class BridgeTest(unittest.TestCase):
         self.assertIn(receipt["request"], call.kwargs["input"])
         self.assertNotIn("test-token", call.kwargs["input"])
         self.assertNotIn("AGENT_ID", call.kwargs["env"])
+        self.assertIn("MYPEOPLE_CONFIG_PATH=", call.kwargs["input"])
+        self.assertNotIn(self.reply_key(), json.dumps(receipt))
+        with self.bridge.ledger() as db:
+            self.assertNotEqual(db.execute("SELECT reply_key_hash FROM requests").fetchone()[0], self.reply_key())
 
     def test_concurrent_retries_send_once(self):
         with ThreadPoolExecutor(max_workers=4) as executor:
@@ -136,16 +146,16 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(self.bridge.ask("cht_shared", "msg_timeout", "coder"), receipt)
         self.assertEqual(self.dispatch.call_count, 2)
 
-    def test_only_target_agent_can_reply_and_reply_cannot_change(self):
+    def test_only_request_key_can_reply_and_reply_cannot_change(self):
         receipt = self.ask()
-        with patch.dict(os.environ, {"AGENT_ID": "sam/main:private"}):
-            with self.assertRaisesRegex(BridgeError, "target_local_agent"):
-                self.bridge.reply(receipt["request"], "no")
         with patch.dict(os.environ, {"AGENT_ID": "sam/main:coder"}):
-            self.bridge.reply(receipt["request"], "yes")
-            self.bridge.reply(receipt["request"], "yes")
+            with self.assertRaisesRegex(BridgeError, "invalid_reply_key"):
+                self.bridge.reply(receipt["request"], "no", "wrong-key")
+        with patch.dict(os.environ, {}, clear=True):
+            self.bridge.reply(receipt["request"], "yes", self.reply_key())
+            self.bridge.reply(receipt["request"], "yes", self.reply_key())
             with self.assertRaisesRegex(BridgeError, "already_replied"):
-                self.bridge.reply(receipt["request"], "different")
+                self.bridge.reply(receipt["request"], "different", self.reply_key())
 
     def test_revoking_chat_or_agent_revokes_existing_requests(self):
         receipt = self.ask()
@@ -161,7 +171,20 @@ class BridgeTest(unittest.TestCase):
             self.bridge.result("cht_shared", receipt["request"])
         with patch.dict(os.environ, {"AGENT_ID": "sam/main:coder"}):
             with self.assertRaisesRegex(BridgeError, "agent_not_shared"):
-                self.bridge.reply(receipt["request"], "no")
+                self.bridge.reply(receipt["request"], "no", self.reply_key())
+
+    def test_reply_key_is_bound_to_its_request_and_expires(self):
+        first = self.ask()
+        first_key = self.reply_key()
+        self.messages[0]["uid"] = "msg_second"
+        second = self.bridge.ask("cht_shared", "msg_second", "coder")
+        second_key = self.reply_key()
+        with self.assertRaisesRegex(BridgeError, "invalid_reply_key"):
+            self.bridge.reply(second["request"], "wrong request", first_key)
+        self.bridge.reply(first["request"], "first reply", first_key)
+        self.bridge.clock = lambda: __import__("time").time() + 901
+        with self.assertRaisesRegex(BridgeError, "not_awaiting_reply"):
+            self.bridge.reply(second["request"], "late reply", second_key)
 
     def test_request_times_out_without_inventing_an_answer(self):
         receipt = self.ask()
