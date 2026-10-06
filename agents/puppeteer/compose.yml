@@ -1,0 +1,11 @@
+services:
+  agent:
+    build: .
+    image: ${PUPPETEER_IMAGE:-puppeteer:local}
+    env_file: ${PLOW_CREDENTIALS:-./plow-credentials}
+    volumes:
+      - agent-home:/var/lib/hermes
+    stop_grace_period: 35s
+
+volumes:
+  agent-home:

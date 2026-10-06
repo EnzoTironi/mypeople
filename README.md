@@ -146,6 +146,11 @@ so turning it on never replays old reviews.
 
 ## Text your Boss
 
+To share selected existing local coding agents through a cloud Hermes agent,
+see [Puppeteer](agents/puppeteer/README.md). Its `mypeople bridge` command
+routes verified Plow messages through Latch and returns a correlated reply
+to the source conversation.
+
 Add `export PLOW_CHAT=1` to `~/.config/mypeople/queue.env`, then `mypeople down && mypeople up`.
 
 The first time it starts, run `python3 "$INSTALL_DIR/plugins/plow-chat/plow-chat.py" status` and text the

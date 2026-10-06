@@ -8,6 +8,7 @@
   mypeople auth-check [--quiet]                        re-check this node's AI login (exit 0 = ready)
   mypeople verify                                      run the shipped acceptance harness
   mypeople logs [name]                                 tail INSTALL_DIR/logs/*.log
+  mypeople bridge configure|agents|ask|result|reply      share selected local agents through Plow Latch
 """
 import os, sys, time, json, signal, subprocess, urllib.request
 from . import firstrun, __version__
@@ -400,6 +401,9 @@ def main():
         return 0
     if not argv or argv[0] == "up":
         return cmd_up(argv[1:] if argv else [])
+    if argv[0] == "bridge":
+        from .bridge import main as bridge_main
+        return bridge_main(argv[1:])
     verb, rest = argv[0], argv[1:]
     table = {"down": cmd_down, "status": cmd_status, "verify": cmd_verify, "logs": cmd_logs,
              "auth-check": cmd_auth_check}

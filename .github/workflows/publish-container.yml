@@ -10,6 +10,11 @@ on:
         description: "Push to GHCR. Off = dry-run build, for validating runners and cache without publishing."
         type: boolean
         default: false
+      agent:
+        description: "Which image to build"
+        type: choice
+        options: [myplow, puppeteer]
+        default: myplow
 
 permissions:
   contents: read
@@ -25,6 +30,7 @@ jobs:
   # build this replaces.
   build:
     name: build ${{ matrix.arch }}
+    if: inputs.agent != 'puppeteer'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -179,3 +185,56 @@ jobs:
       - name: Plow image reference
         run: |
           echo "Plow image: ghcr.io/delattre1/myplow-cloud@${{ steps.build.outputs.digest }}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  puppeteer-tests:
+    if: inputs.agent == 'puppeteer'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test the local bridge and CLI
+        run: |
+          python3 -m unittest discover -s tests -p 'test_bridge.py' -v
+          python3 -W ignore::ResourceWarning -m unittest discover -s tests -p 'test_login_required.py'
+          python3 -W ignore::ResourceWarning -m unittest discover -s tests -p 'test_no_downgrade.py'
+          python3 -W ignore::ResourceWarning -m unittest discover -s tests -p 'test_yolo_seed.py'
+
+  puppeteer-image:
+    needs: puppeteer-tests
+    if: inputs.agent == 'puppeteer'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        if: inputs.push_image
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Fetch pinned Plow CLI
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/plow-pbc/plow-agents/53dd92242e88f6e877cc09dbfb08b31b0e3925cb/bin/plow-agents -o "$RUNNER_TEMP/plow-agents"
+          chmod +x "$RUNNER_TEMP/plow-agents"
+      - name: Build Puppeteer
+        working-directory: agents/puppeteer
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          "$RUNNER_TEMP/plow-agents" image build "ghcr.io/$owner/puppeteer:${GITHUB_SHA}"
+      - name: Probe credential-free image contents
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          docker run --rm --entrypoint /bin/sh "ghcr.io/$owner/puppeteer:${GITHUB_SHA}" -ec '
+            test -s /opt/hermes/plow-seed/persona.md
+            test -s /var/lib/hermes/skills/productivity/puppeteer/SKILL.md
+            test -s /opt/hermes/skills/productivity/puppeteer/SKILL.md
+            test -s /usr/share/licenses/puppeteer/LICENSE
+            test -x /opt/plow/agent-index-client.py
+          '
+      - name: Push exact Puppeteer image
+        if: inputs.push_image
+        working-directory: agents/puppeteer
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          "$RUNNER_TEMP/plow-agents" image push "ghcr.io/$owner/puppeteer:${GITHUB_SHA}" | tee -a "$GITHUB_STEP_SUMMARY"
