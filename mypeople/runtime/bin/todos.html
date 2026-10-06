@@ -134,7 +134,7 @@ li.task:hover::before,li.task:hover+li.task::before{opacity:0}
 li.task.enter{opacity:0;transform:translateY(8px)}
 li.task.completing{opacity:.45}
 li.task.done .task-text,li.task.cancelled .task-text{color:var(--muted-dark)}
-li.task.done .task-text{text-decoration:line-through;text-decoration-color:rgba(240,240,232,.25)}
+li.task.done .task-text,li.task.cancelled .task-text{text-decoration:line-through;text-decoration-color:rgba(240,240,232,.25)}
 .task-top{display:flex;gap:12px;align-items:center;min-height:54px;padding:8px 8px 8px 10px}
 .check{width:32px;height:32px;display:grid;place-items:center;border-radius:9px;flex:0 0 auto;transition:background .15s}
 .check:hover{background:rgba(255,255,255,.06)}
@@ -468,7 +468,7 @@ function statusIcon(s,size){
   if(s==="done") return '<svg class="si si-done" width="'+size+'" height="'+size+'" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="8.4" fill="#34c759"/><path d="M6.6 10.2l2.3 2.3 4.6-4.9" fill="none" stroke="#0b1a0f" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   if(s==="review") return ring("#5ac8fa")+'<circle class="fill" cx="10" cy="10" r="3.3" fill="#5ac8fa"/>'+ck+'</svg>';
   if(s==="blocked") return ring("#ff3b30")+'<g class="fill"><path d="M10 6.3v4.4" stroke="#ff3b30" stroke-width="1.8" stroke-linecap="round"/><circle cx="10" cy="13.5" r="1.05" fill="#ff3b30"/></g>'+ck+'</svg>';
-  if(s==="cancelled") return ring("rgba(240,240,232,.32)")+'<path d="M7.2 12.8l5.6-5.6" stroke="rgba(240,240,232,.42)" stroke-width="1.6" stroke-linecap="round"/></svg>';
+  if(s==="cancelled") return '<svg class="si si-cancelled" width="'+size+'" height="'+size+'" viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="8.4" fill="rgba(240,240,232,.3)"/><path d="M7.4 7.4l5.2 5.2M12.6 7.4l-5.2 5.2" fill="none" stroke="#111110" stroke-width="1.9" stroke-linecap="round"/></svg>';
   if(s==="recurring") return ring("#C4BFFF",' stroke-dasharray="2.6 2.4"')+ck+'</svg>';
   return ring("rgba(240,240,232,.42)")+'<path class="fill" d="M10 5.5a4.5 4.5 0 0 1 0 9z" fill="rgba(240,240,232,.42)"/>'+ck+'</svg>';
 }
@@ -665,6 +665,7 @@ function cardEl(task){
   txt.title=task.text||"";
   main.appendChild(txt);
   if(needsYou(task)){ const badge=document.createElement("span"); badge.className="badge st-"+task.state; badge.textContent=task.state==="review"?"Needs you":"Blocked"; main.appendChild(badge); }
+  if(task.state==="cancelled"){ const badge=document.createElement("span"); badge.className="badge st-cancelled"; badge.textContent="Cancelled"; main.appendChild(badge); }
   if(task.verified && task.state==="done"){ const v=document.createElement("span"); v.className="ver"; v.title="Verified"; v.innerHTML=icon("check",14,2.5); main.appendChild(v); }
   if(hasUnread(task)){ const u=document.createElement("span"); u.className="dotnew"; u.title=task.unread+" new since you last opened it"; main.appendChild(u); }
   const aside=document.createElement("div"); aside.className="task-aside";
