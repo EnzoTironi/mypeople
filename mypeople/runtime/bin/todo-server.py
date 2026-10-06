@@ -910,24 +910,9 @@ class Handler(BaseHTTPRequestHandler):
         node_ids = {n["agent_id"] for n in nodes}
         edges = [{"from": n["boss_id"], "to": n["agent_id"]} for n in nodes
                  if n["boss_id"] in node_ids]
-        with LOCK: board = load_board()
-        tasks = []
-        for task in board.get("tasks", {}).values():
-            assignee = task.get("assignee") or ""; state = task.get("state") or "working"
-            tid = task.get("id", "")
-            if not tid: continue
-            tasks.append({"id": tid, "title": task.get("text", ""), "state": state,
-                          "assignee": assignee, "owner_live": assignee in node_ids,
-                          "archived": state in TERMINAL_STATES,
-                          "pinned": bool(task.get("pinned")),
-                          "updated": task.get("updated", 0),
-                          "href": "/terminal-graph?task=" + urllib.parse.quote(tid, safe="")})
-        tasks.sort(key=lambda t: (t["assignee"], t["state"], t["id"]))
-        task_edges = [{"from": t["assignee"], "to": "task:" + t["id"]} for t in tasks
-                      if t["owner_live"] and not t["archived"]]
         # Ports come from config, never constants: the tiles are iframes onto this install's own
         # ttyd, and a hardcoded port silently renders every tile dead wherever ttyd was moved.
-        return {"nodes": nodes, "edges": edges, "tasks": tasks, "task_edges": task_edges,
+        return {"nodes": nodes, "edges": edges,
                 "readonly_port": int(CFG["TTYD_RO_PORT"]),
                 "interactive_port": int(CFG["TTYD_BROWSER_PORT"]), "ts": now()}
 

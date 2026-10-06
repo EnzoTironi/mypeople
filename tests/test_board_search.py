@@ -12,7 +12,6 @@ import unittest
 
 BIN = Path(__file__).resolve().parents[1] / "mypeople" / "runtime" / "bin"
 HTML = (BIN / "todos.html").read_text()
-GRAPH = (BIN / "terminal-graph.html").read_text()
 
 
 def block(name):
@@ -100,10 +99,6 @@ class ShortcutWiringTests(unittest.TestCase):
 
     def test_escape_clears_the_filter(self):
         self.assertRegex(HTML, r'e\.key==="Escape"\)\{[^}]*query=""')
-
-    def test_graph_takes_the_same_shortcut(self):
-        self.assertIn('getElementById("taskSearch")', GRAPH)
-        self.assertRegex(GRAPH, r'e\.key\.toLowerCase\(\)==="f"')
 
 
 if __name__ == "__main__":

@@ -15,7 +15,6 @@ import unittest
 
 BIN = Path(__file__).resolve().parents[1] / "mypeople" / "runtime" / "bin"
 HTML = (BIN / "todos.html").read_text()
-GRAPH = (BIN / "terminal-graph.html").read_text()
 
 # The minimal DOM markdownInline touches: text nodes, a/strong/em/code elements, appendChild.
 HARNESS = r"""
@@ -67,18 +66,9 @@ class LinkifyTests(unittest.TestCase):
         }
         board = HARNESS % (fn("safeMarkdownHref"), fn("markdownInline"))
         cls.out = run(board.replace("RENDER", "markdownInline"), cls.cases)
-        # The Graph's task modal renders comments with its own linkify(); it must agree with the
-        # board on every bare URL, or the same comment links differently on the two pages.
-        graph = HARNESS % ("", fn("linkify", GRAPH))
-        cls.graph = run(graph.replace("RENDER", "linkify"), cls.cases)
 
     def links(self, key, out=None):
         return [c for c in (out or self.out)[key] if c.get("tag") == "a"]
-
-    def test_the_graph_modal_links_bare_urls_exactly_like_the_board(self):
-        for key in ("bare", "period", "paren", "wiki", "js", "two"):
-            with self.subTest(case=key):
-                self.assertEqual(self.graph[key], self.out[key])
 
     def test_a_bare_url_becomes_a_link(self):
         (a,) = self.links("bare")

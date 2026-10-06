@@ -23,21 +23,17 @@ class MobileModalTest(unittest.TestCase):
 
     def setUp(self):
         self.todos = (BIN / "todos.html").read_text()
-        self.graph = (BIN / "terminal-graph.html").read_text()
 
-    def test_both_pages_track_the_visual_viewport(self):
+    def test_the_board_tracks_the_visual_viewport(self):
         # Without this listener --vvh is never written and the modal keeps its desktop height.
-        for name, html in (("todos.html", self.todos), ("terminal-graph.html", self.graph)):
-            with self.subTest(page=name):
-                self.assertIn("window.visualViewport", html)
-                self.assertIn('setProperty("--vvh"', html)
-                self.assertIn('setProperty("--vvtop"', html)
+        # (The task modal is the board's alone: the graph shows terminals, not tasks.)
+        self.assertIn("window.visualViewport", self.todos)
+        self.assertIn('setProperty("--vvh"', self.todos)
+        self.assertIn('setProperty("--vvtop"', self.todos)
 
-    def test_both_pages_size_the_mobile_modal_from_vvh(self):
-        for name, html in (("todos.html", self.todos), ("terminal-graph.html", self.graph)):
-            with self.subTest(page=name):
-                self.assertRegex(html, r"@media\s*\(max-width:640px\)")
-                self.assertIn("height:var(--vvh,100dvh)", html)
+    def test_the_board_sizes_the_mobile_modal_from_vvh(self):
+        self.assertRegex(self.todos, r"@media\s*\(max-width:640px\)")
+        self.assertIn("height:var(--vvh,100dvh)", self.todos)
 
     def test_todos_thread_can_shrink_under_the_keyboard(self):
         # .thread{min-height:360px} outside the media query blocks the shrink and shoves the
@@ -46,9 +42,6 @@ class MobileModalTest(unittest.TestCase):
 
     def test_mobile_inputs_stay_at_or_above_the_ios_zoom_floor(self):
         # iOS zooms the page on focus for anything under 16px, which strands the composer.
-        mobile = self._mobile_block(self.graph)
-        for size in re.findall(r"font-size:(\d+)px", mobile):
-            self.assertGreaterEqual(int(size), 16, "graph mobile input under the iOS zoom floor")
         rule = re.search(r"#composer\{([^}]*)\}", self.todos)
         self.assertIsNotNone(rule, "#composer rule is gone")
         composer_size = re.search(r"font-size:(\d+)px", rule.group(1))
