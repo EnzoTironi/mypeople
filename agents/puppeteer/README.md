@@ -1,7 +1,7 @@
 # Puppeteer
 
 Let people in a Plow conversation talk to the Claude Code and Codex agents
-already running on your Mac. The local agent keeps its session and project,
+running in MyPlow on your Mac. The local agent keeps its session and project,
 and its reply returns to the conversation that asked.
 
 Puppeteer is a Hermes variant built on the public Plow base image. Plow Chat
@@ -27,8 +27,21 @@ Install this fork's version of MyPlow:
 uv tool install --force 'git+https://github.com/EnzoTironi/mypeople.git@feat/puppeteer-agent'
 ```
 
-Choose a backend and authenticate it on this Mac. Start
-MyPlow and confirm the target agent can answer locally. Install and sign in
+If the Mac currently has only Latch, install MyPlow too. On macOS with
+Homebrew, install its terminal dependencies, authenticate a coding backend,
+and start a local team:
+
+```sh
+brew install tmux ttyd asciinema
+codex login
+mypeople up --backend codex --detach
+mypeople status
+```
+
+For Claude Code, use `claude auth login` and `--backend claude` instead.
+Confirm the target agent can answer locally. This bridge reaches sessions
+managed by MyPlow; it does not attach to arbitrary Codex desktop tabs or
+unmanaged Claude terminals. Install and sign in
 to [Plow Latch](https://github.com/plow-pbc/latch) on the same Plow account
 used for Puppeteer. Keep the Mac awake and Latch open during the demo.
 

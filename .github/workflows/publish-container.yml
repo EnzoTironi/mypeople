@@ -230,7 +230,9 @@ jobs:
             test -s /var/lib/hermes/skills/productivity/puppeteer/SKILL.md
             test -s /opt/hermes/skills/productivity/puppeteer/SKILL.md
             test -s /usr/share/licenses/puppeteer/LICENSE
-            test -x /opt/plow/agent-index-client.py
+            test -r /opt/plow/agent-index-client.py
+            test -x /etc/s6-overlay/s6-rc.d/agent-index/run
+            /opt/hermes/.venv/bin/python3 /opt/plow/agent-index-client.py --help >/dev/null
           '
       - name: Push exact Puppeteer image
         if: inputs.push_image
